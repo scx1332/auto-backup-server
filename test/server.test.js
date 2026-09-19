@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBackupServer } from "../src/server.js";
 import { backupName, HOUR, pruneBackups } from "../src/retention.js";
+import { DEFAULT_PROJECT_ID } from "../src/projects.js";
 
 const token = "test-secret-token";
 const headers = { Authorization: `Bearer ${token}` };
@@ -13,12 +14,14 @@ const cleanup = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()(); });
 
 async function fixture(options = {}, setup = async () => {}) {
-  const directory = await mkdtemp(join(tmpdir(), "backup-server-test-"));
-  cleanup.push(() => rm(directory, { recursive: true, force: true }));
+  const rootDirectory = await mkdtemp(join(tmpdir(), "backup-server-test-"));
+  const directory = join(rootDirectory, DEFAULT_PROJECT_ID);
+  cleanup.push(() => rm(rootDirectory, { recursive: true, force: true }));
+  await mkdir(directory);
   await setup(directory);
-  const app = await createBackupServer({ token, directory, port: 0, hostname: "127.0.0.1", ...options });
+  const app = await createBackupServer({ token, directory: rootDirectory, port: 0, hostname: "127.0.0.1", ...options });
   cleanup.push(() => app.stop());
-  return { ...app, directory, url: app.server.url.href.slice(0, -1) };
+  return { ...app, directory, rootDirectory, url: app.server.url.href.slice(0, -1) };
 }
 
 async function eventually(check) {
@@ -30,7 +33,10 @@ async function eventually(check) {
   }
 }
 
-function streamingUpload(url, path = "/upload") {
+const sha1Of = (body) => createHash("sha1").update(body).digest("hex");
+const uploadUrl = (url, body) => `${url}/upload/${sha1Of(body)}`;
+
+function streamingUpload(url, path = `/upload/${sha1Of("first-last")}`) {
   let request;
   const response = new Promise((resolve, reject) => {
     request = httpRequest(`${url}${path}`, { method: "POST", headers }, (res) => {
@@ -69,14 +75,14 @@ test("stores opaque bytes, exceeds Bun's default body limit, and lists exact siz
   const { url, directory } = await fixture();
   const body = Buffer.alloc(12 * 1024 * 1024);
   for (let i = 0; i < body.length; i += 4096) body[i] = (i / 4096) % 256;
-  const response = await fetch(`${url}/upload?filename=original-secret-name`, { method: "POST", headers, body });
+  const response = await fetch(`${uploadUrl(url, body)}?filename=original-secret-name`, { method: "POST", headers, body });
   expect(response.status).toBe(201);
   const record = await response.json();
   expect(record.name).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z\.backup$/);
   expect(record.size).toBe(body.length);
   expect(await readFile(join(directory, record.name))).toEqual(body);
   expect((await stat(join(directory, record.name))).mode & 0o777).toBe(0o600);
-  expect(await (await fetch(`${url}/list`, { headers })).json()).toEqual({ files: [record] });
+  expect(await (await fetch(`${url}/list`, { headers })).json()).toEqual({ files: [{ name: record.name, size: record.size }] });
 });
 
 test("verified upload returns the on-disk SHA-1 and accepts uppercase checksums", async () => {
@@ -150,7 +156,7 @@ test("rejects concurrent uploads immediately, hides partial files, then releases
   const first = await stream.response;
   expect(first.status).toBe(201);
   expect(await readFile(join(directory, first.body.name), "utf8")).toBe("first-last");
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "next" })).status).toBe(201);
+  expect((await fetch(uploadUrl(url, "next"), { method: "POST", headers, body: "next" })).status).toBe(201);
   expect((await readdir(directory)).length).toBe(2);
 });
 
@@ -160,7 +166,7 @@ test("times out a stalled upload, removes its partial file, and permits the next
   stream.request.write("partial");
   expect((await stream.response).status).toBe(408);
   expect(await readdir(directory)).toEqual([]);
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "complete" })).status).toBe(201);
+  expect((await fetch(uploadUrl(url, "complete"), { method: "POST", headers, body: "complete" })).status).toBe(201);
 });
 
 test("the deadline is total duration, even when chunks keep arriving", async () => {
@@ -187,28 +193,28 @@ test("disconnect removes partial data and releases the upload lock", async () =>
   await eventually(async () => (await stat(join(directory, ".upload.part")).catch(() => null))?.size > 0);
   stream.request.destroy();
   await eventually(async () => (await readdir(directory)).length === 0);
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "complete" })).status).toBe(201);
+  expect((await fetch(uploadUrl(url, "complete"), { method: "POST", headers, body: "complete" })).status).toBe(201);
 });
 
 test("rejects empty/multipart uploads without leaving files or blocking later uploads", async () => {
   const { url, directory } = await fixture();
-  expect((await fetch(`${url}/upload`, { method: "POST", headers })).status).toBe(400);
+  expect((await fetch(uploadUrl(url, ""), { method: "POST", headers })).status).toBe(400);
   const form = new FormData();
   form.set("file", new Blob(["contents"]), "secret-name");
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: form })).status).toBe(415);
+  expect((await fetch(uploadUrl(url, "contents"), { method: "POST", headers, body: form })).status).toBe(415);
   expect(await readdir(directory)).toEqual([]);
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "complete" })).status).toBe(201);
+  expect((await fetch(uploadUrl(url, "complete"), { method: "POST", headers, body: "complete" })).status).toBe(201);
 });
 
 test("storage failure returns an error and releases the lock for recovery", async () => {
-  const { url, directory } = await fixture();
-  await rename(directory, `${directory}-offline`);
+  const { url, rootDirectory } = await fixture();
+  await rename(rootDirectory, `${rootDirectory}-offline`);
   try {
-    expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "cannot-store" })).status).toBe(500);
+    expect((await fetch(uploadUrl(url, "cannot-store"), { method: "POST", headers, body: "cannot-store" })).status).toBe(500);
   } finally {
-    await rename(`${directory}-offline`, directory);
+    await rename(`${rootDirectory}-offline`, rootDirectory);
   }
-  expect((await fetch(`${url}/upload`, { method: "POST", headers, body: "complete" })).status).toBe(201);
+  expect((await fetch(uploadUrl(url, "complete"), { method: "POST", headers, body: "complete" })).status).toBe(201);
 });
 
 test("startup discards interrupted upload, prunes old backups, and ignores unrelated files/symlinks", async () => {
@@ -245,7 +251,7 @@ test("rapid uploads and restart never overwrite existing backups", async () => {
   });
   const names = new Set(await readdir(directory));
   for (let i = 0; i < 10; i++) {
-    const response = await fetch(`${url}/upload`, { method: "POST", headers, body: `backup-${i}` });
+    const response = await fetch(uploadUrl(url, `backup-${i}`), { method: "POST", headers, body: `backup-${i}` });
     expect(response.status).toBe(201);
     names.add((await response.json()).name);
   }
