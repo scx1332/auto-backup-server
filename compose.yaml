@@ -1,0 +1,20 @@
+services:
+  backup:
+    image: ${BACKUP_IMAGE:-auto-backup-server:local}
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      BACKUP_TOKEN: ${BACKUP_TOKEN:?Set BACKUP_TOKEN in .env}
+      BACKUP_DIR: /data/backups
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${PORT:-3000}:3000"
+    volumes:
+      - type: bind
+        source: ${BACKUP_DIR:-./backups}
+        target: /data/backups
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
