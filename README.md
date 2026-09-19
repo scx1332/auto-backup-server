@@ -123,12 +123,15 @@ timestamps in filenames, not filesystem modification times. In each age band:
 | --- | --- |
 | Up to and including 1 hour | Every file |
 | More than 1 hour, up to and including 48 hours | Newest file per populated UTC hour |
-| More than 48 hours, up to and including one calendar month | Newest file per populated UTC day |
-| More than one calendar month | Newest file per populated UTC month, indefinitely |
+| More than 48 hours, up to and including 30 days | Newest file per populated UTC day |
+| More than 30 days | Delete unless needed to retain one backup for its UTC calendar month |
 
-A calendar month means the same UTC time on the previous month's date, clamped
-to its last day when necessary. Retention ignores unrelated filenames,
-directories, and symbolic links. Empty time buckets do not create new backups.
+The daily window is exactly 30 × 24 hours, regardless of month length. A recent,
+hourly, or daily backup already represents its UTC calendar month, so any files
+older than 30 days in that same month are deleted. If all backups in a month are
+older than 30 days, only the newest one is kept, indefinitely. Retention ignores
+unrelated filenames, directories, and symbolic links. Empty time buckets do not
+create new backups.
 
 ## Tests and releases
 

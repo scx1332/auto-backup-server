@@ -73,7 +73,7 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY}"
           printf '%s@%s\n' "$image" "$IMAGE_DIGEST" > image-digest.txt
           cat > release-notes.md <<EOF
-          Zero-dependency Bun backup server with authenticated streaming uploads, on-disk SHA-1 verification, a one-hour deadline, and UTC hourly/daily/monthly retention.
+          Zero-dependency Bun backup server with authenticated streaming uploads, on-disk SHA-1 verification, and a one-hour deadline. Retention keeps all files for one hour, hourly backups through 48 hours, daily backups through exactly 30 days, and at least one backup per populated UTC calendar month thereafter.
 
           Container image: \`${image}:${RELEASE_TAG}\`
 
